@@ -1,0 +1,12 @@
+﻿variable,meaning,unit
+datetime,"Date and time of the reading, rounded to the hour (Philippine time, UTC+8)",date-time
+town,"Laguna town: Biñan, Cabuyao, or Calamba",text
+aqi_level,"Air quality level from OpenWeatherMap: 1 = Good, 2 = Fair, 3 = Moderate, 4 = Poor, 5 = Very Poor",integer (1-5)
+pm2_5,Fine particles smaller than 2.5 micrometers,µg/m³
+pm10,Coarse particles smaller than 10 micrometers,µg/m³
+no2,Nitrogen dioxide,µg/m³
+o3,Ozone,µg/m³
+so2,Sulphur dioxide,µg/m³
+co,Carbon monoxide,µg/m³
+no,Nitrogen monoxide,µg/m³
+nh3,Ammonia,µg/m³

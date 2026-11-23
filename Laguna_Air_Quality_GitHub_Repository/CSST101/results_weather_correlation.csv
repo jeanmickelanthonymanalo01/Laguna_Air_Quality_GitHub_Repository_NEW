@@ -1,0 +1,5 @@
+variable,rho,p_value,strength
+rain_mm,-0.165,5.219999999999998e-112,very weak
+humidity,-0.152,2.1599999999999993e-95,very weak
+wind_kmh,0.06,7.43e-16,very weak
+temperature,0.006,0.456,very weak

@@ -1,0 +1,3 @@
+model,r_squared
+"Time only (season, year, hour)",0.157
+Time + weather,0.185

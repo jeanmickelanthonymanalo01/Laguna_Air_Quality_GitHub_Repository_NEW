@@ -1,0 +1,8 @@
+variable,rho,p_value,strength
+pm10,0.953,0,strong
+so2,0.576,0,moderate
+co,0.486,0,moderate
+no2,0.422,0,moderate
+nh3,0.356,0,weak
+o3,0.31,0,weak
+no,0.223,4.429999999999998e-207,weak

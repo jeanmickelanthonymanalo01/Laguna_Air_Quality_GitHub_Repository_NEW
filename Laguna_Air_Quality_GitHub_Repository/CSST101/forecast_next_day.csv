@@ -1,0 +1,2 @@
+date,predicted_level,predicted_label,prob_good,prob_fair,prob_moderate_or_worse,note
+2026-10-22,2,Fair,0.314,0.633,0.053,Random Forest. Test accuracy 71% (the simple 'same as today' rule scored 74%).

@@ -1,0 +1,443 @@
+---
+title: "Air Quality in Laguna: An R Analysis of PM2.5, Time Factors, and Weather"
+subtitle: "CSST101 (R Programming) Final Project"
+author: "Manalo (Group ChunkyChucky), Laguna State Polytechnic University"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  word_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 7, fig.height = 4, dpi = 150)
+library(tidyverse)
+library(lubridate)
+library(jsonlite)
+library(knitr)
+```
+
+# 1. Introduction
+
+Air pollution affects the health of residents, especially children, the elderly, and people with asthma. This project studies air quality in Laguna, Philippines. It supports UN Sustainable Development Goal 11 (Sustainable Cities and Communities) and the DOST CALABARZON Hack4aProgress Track 4 (AI for Environmental Sustainability).
+
+**Practical question:** Which time factors, pollutants, and weather conditions are related to PM2.5 (fine particles in the air) in Laguna?
+
+This report is the R data analysis part of a larger project. The machine learning forecast is handled separately in CSST102.
+
+# 2. Data and Methods
+
+## 2.1 Data source
+
+The air quality data comes from the Kaggle dataset "Philippine Cities Air Quality Index Data 2026" (CC0 Public Domain), which contains hourly air pollution data from OpenWeatherMap. Monthly files from November 2023 to October 2026 were combined, and only three cities with Laguna coordinates were kept: Biñan, Cabuyao, and Calamba. Readings were rounded to the hour, and placeholder values such as -9999 were set to missing. This preparation produced the file `laguna_air_quality_2023-2026.csv`.
+
+The weather data (temperature, humidity, rain, and wind speed) comes from the Open-Meteo Historical Weather API for one point in the middle of the three towns.
+
+## 2.2 Variables
+
+| Variable | Meaning | Unit |
+|---|---|---|
+| datetime | Date and time of the reading (Philippine time, rounded to the hour) | date-time |
+| town | Biñan, Cabuyao, or Calamba | text |
+| aqi_level | OpenWeatherMap air quality level: 1 Good, 2 Fair, 3 Moderate, 4 Poor, 5 Very Poor | 1 to 5 |
+| pm2_5, pm10 | Particles smaller than 2.5 and 10 micrometers | µg/m³ |
+| no2, o3, so2, co, no, nh3 | Nitrogen dioxide, ozone, sulphur dioxide, carbon monoxide, nitrogen monoxide, ammonia | µg/m³ |
+| temperature, humidity, rain_mm, wind_kmh | Weather (Open-Meteo) | °C, %, mm per hour, km/h |
+
+## 2.3 Importing and cleaning the data
+
+```{r import}
+aq <- read_csv("laguna_air_quality_2023-2026.csv")
+dim(aq)
+range(aq$datetime)
+colSums(is.na(aq))
+sum(duplicated(aq[c("town", "datetime")]))
+```
+
+Rows without PM2.5 or PM10 were removed.
+
+```{r clean}
+aq_clean <- aq %>%
+  filter(!is.na(pm2_5), !is.na(pm10)) %>%
+  distinct(town, datetime, .keep_all = TRUE)
+
+nrow(aq) - nrow(aq_clean)   # rows removed
+nrow(aq_clean)              # rows kept
+```
+
+## 2.4 Are the three towns different?
+
+The towns are close together, so the source may give them the same values. This was checked by comparing PM2.5 across the three towns for each hour.
+
+```{r town-check}
+town_spread <- aq_clean %>%
+  group_by(datetime) %>%
+  summarise(n_towns = n(), spread = max(pm2_5) - min(pm2_5), .groups = "drop") %>%
+  filter(n_towns == 3)
+
+summary(town_spread$spread)
+mean(town_spread$spread == 0) * 100   # percent of hours with identical PM2.5
+```
+
+PM2.5 is identical across the three towns in 99.9% of hours. Because of this, the towns were combined into **one Laguna series with one row per hour**, using the average of the towns. Comparing towns with each other would not be meaningful.
+
+```{r hourly}
+pollutants <- c("pm2_5", "pm10", "no2", "o3", "so2", "co", "no", "nh3")
+
+laguna_hourly <- aq_clean %>%
+  group_by(datetime) %>%
+  summarise(across(all_of(pollutants), mean),
+            aqi_level = round(mean(aqi_level)),
+            .groups = "drop") %>%
+  mutate(
+    year   = year(datetime),
+    month  = month(datetime),
+    hour   = hour(datetime),
+    season = factor(if_else(month %in% 6:11, "Rainy", "Dry"),
+                    levels = c("Dry", "Rainy")),   # Philippines: rainy Jun to Nov
+    year_f = factor(year),
+    hour_f = factor(hour),
+    aqi_label = factor(aqi_level, levels = 1:5,
+                       labels = c("Good", "Fair", "Moderate", "Poor", "Very Poor"))
+  )
+
+nrow(laguna_hourly)
+```
+
+## 2.5 Adding weather data
+
+If `weather_laguna.csv` is in the folder, it is used. Otherwise the weather is downloaded from Open-Meteo (internet needed) and saved.
+
+```{r weather}
+if (file.exists("weather_laguna.csv")) {
+  weather <- read_csv("weather_laguna.csv")
+} else {
+  lat <- 14.2757   # average of the three towns
+  lon <- 121.1241
+  url <- paste0(
+    "https://archive-api.open-meteo.com/v1/archive",
+    "?latitude=", lat, "&longitude=", lon,
+    "&start_date=2023-11-06&end_date=2026-10-15",
+    "&hourly=temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m",
+    "&timezone=Asia%2FManila")
+  raw <- fromJSON(url)
+  # Local clock times are labeled UTC so they match the air quality file.
+  weather <- tibble(
+    datetime    = as.POSIXct(raw$hourly$time, format = "%Y-%m-%dT%H:%M", tz = "UTC"),
+    temperature = raw$hourly$temperature_2m,
+    humidity    = raw$hourly$relative_humidity_2m,
+    rain_mm     = raw$hourly$precipitation,
+    wind_kmh    = raw$hourly$wind_speed_10m)
+  write_csv(weather, "weather_laguna.csv")
+}
+
+air_w <- laguna_hourly %>%
+  inner_join(weather, by = "datetime") %>%
+  drop_na(temperature, humidity, rain_mm, wind_kmh) %>%
+  mutate(rain_group = case_when(rain_mm == 0   ~ "No rain",
+                                rain_mm <= 2.5 ~ "Light rain",
+                                TRUE           ~ "Moderate/heavy rain"),
+         rain_group = factor(rain_group,
+                             levels = c("No rain", "Light rain", "Moderate/heavy rain")))
+
+nrow(air_w)   # hours that have both air quality and weather
+```
+
+## 2.6 Statistical methods
+
+PM2.5 is very skewed (many low values and a few very high ones), so rank-based methods were used: Spearman correlation, the Wilcoxon rank-sum test (two groups), and the Kruskal-Wallis test (more than two groups). A linear model of log(PM2.5 + 1) was used to see how much season, year, hour, and weather explain together.
+
+# 3. Results
+
+## 3.1 Overall air quality
+
+```{r aqi-levels}
+laguna_hourly %>%
+  count(aqi_label) %>%
+  mutate(percent = round(100 * n / sum(n), 1)) %>%
+  kable(col.names = c("Air quality level", "Hours", "Percent"),
+        caption = "Air quality levels in Laguna (hourly, Nov 2023 to Oct 2026)")
+```
+
+Air quality was Good or Fair in about 89% of hours. Poor and Very Poor levels were rare (about 2%).
+
+```{r overall-stats}
+laguna_hourly %>%
+  summarise(across(all_of(pollutants),
+                   list(mean = ~mean(.x, na.rm = TRUE),
+                        median = ~median(.x, na.rm = TRUE),
+                        max = ~max(.x, na.rm = TRUE)))) %>%
+  pivot_longer(everything(),
+               names_to = c("pollutant", "stat"),
+               names_pattern = "(.*)_(mean|median|max)$") %>%
+  pivot_wider(names_from = stat, values_from = value) %>%
+  mutate(across(where(is.numeric), ~round(.x, 2))) %>%
+  kable(caption = "Summary of pollutants (µg/m³)")
+```
+
+```{r chart-time, fig.cap="Monthly average PM2.5 in Laguna"}
+laguna_hourly %>%
+  mutate(ym = floor_date(datetime, "month")) %>%
+  group_by(ym) %>%
+  summarise(avg_pm25 = mean(pm2_5, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(ym, avg_pm25)) +
+  geom_line(linewidth = 0.8, color = "#2c7fb8") +
+  geom_point(color = "#2c7fb8") +
+  labs(title = "Monthly Average PM2.5 in Laguna",
+       subtitle = "Biñan, Cabuyao, and Calamba, Nov 2023 to Oct 2026",
+       x = "Month", y = "PM2.5 (µg/m³)") +
+  theme_minimal()
+```
+
+## 3.2 Which pollutants relate to PM2.5?
+
+```{r pollutant-cor}
+others <- c("pm10", "no2", "o3", "so2", "co", "no", "nh3")
+
+cor_results <- map_dfr(others, function(v) {
+  t <- cor.test(laguna_hourly$pm2_5, laguna_hourly[[v]],
+                method = "spearman", exact = FALSE)
+  tibble(variable = v, rho = round(unname(t$estimate), 3),
+         p_value = signif(t$p.value, 3))
+}) %>%
+  mutate(strength = case_when(abs(rho) >= 0.7 ~ "strong",
+                              abs(rho) >= 0.4 ~ "moderate",
+                              abs(rho) >= 0.2 ~ "weak",
+                              TRUE            ~ "very weak")) %>%
+  arrange(desc(abs(rho)))
+
+kable(cor_results, caption = "Spearman correlation of PM2.5 with other pollutants (p-values of 0 mean p < 0.001)")
+```
+
+```{r chart-heatmap, fig.cap="Pearson correlation between pollutants (the table above uses Spearman rank correlation)"}
+cm <- cor(laguna_hourly[pollutants], use = "pairwise.complete.obs")
+cm_long <- as.data.frame(as.table(cm))
+names(cm_long) <- c("var1", "var2", "r")
+
+ggplot(cm_long, aes(var1, var2, fill = r)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(r, 2)), size = 3) +
+  scale_fill_gradient2(low = "#2166ac", mid = "white", high = "#b2182b",
+                       limits = c(-1, 1), name = "Correlation") +
+  labs(title = "Correlation Between Pollutants", x = NULL, y = NULL) +
+  theme_minimal()
+```
+
+PM2.5 has a strong relationship with PM10 (rho = 0.953), moderate relationships with SO2, CO, and NO2, and weak relationships with NH3, O3, and NO.
+
+## 3.3 Time factors
+
+### Season
+
+```{r season}
+laguna_hourly %>%
+  group_by(season) %>%
+  summarise(hours = n(), median = round(median(pm2_5), 2),
+            mean = round(mean(pm2_5), 2), .groups = "drop") %>%
+  kable(caption = "PM2.5 by season (µg/m³)")
+
+w <- wilcox.test(pm2_5 ~ season, data = laguna_hourly, exact = FALSE)
+w$p.value                                   # 0 means smaller than R can show
+n_dry   <- sum(laguna_hourly$season == "Dry")
+n_rainy <- sum(laguna_hourly$season == "Rainy")
+unname(w$statistic) / (n_dry * n_rainy)     # chance a dry hour is higher than a rainy hour
+```
+
+```{r chart-season, fig.cap="PM2.5 in the dry and rainy season"}
+ggplot(laguna_hourly, aes(season, pm2_5, fill = season)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  coord_cartesian(ylim = c(0, 40)) +
+  scale_fill_manual(values = c("Dry" = "#fdae6b", "Rainy" = "#9ecae1")) +
+  labs(title = "PM2.5 in the Dry and Rainy Season",
+       subtitle = "Axis cut at 40 to show the main range",
+       x = "Season", y = "PM2.5 (µg/m³)") +
+  theme_minimal() + theme(legend.position = "none")
+```
+
+Typical PM2.5 was higher in the dry season (median 6.68 µg/m³) than in the rainy season (median 3.36 µg/m³), and a random dry-season hour was higher than a random rainy-season hour in about 71% of pairs. The means were close (9.18 and 8.58) because a few large spikes in the rainy months of 2024 raised the rainy-season average.
+
+### Hour of day
+
+Only March 2025 onward is used here, because earlier data was not recorded every hour.
+
+```{r hour}
+hourly_only <- laguna_hourly %>%
+  filter(datetime >= as.POSIXct("2025-03-01", tz = "UTC"))
+
+hour_table <- hourly_only %>%
+  group_by(hour) %>%
+  summarise(median = round(median(pm2_5), 2), mean = round(mean(pm2_5), 2),
+            .groups = "drop")
+
+range(hour_table$mean)
+kruskal.test(pm2_5 ~ hour_f, data = hourly_only)
+```
+
+```{r chart-hour, fig.cap="Average PM2.5 by hour of day"}
+ggplot(hour_table, aes(hour, mean)) +
+  geom_line(linewidth = 0.8, color = "#d95f0e") +
+  geom_point(color = "#d95f0e") +
+  scale_x_continuous(breaks = seq(0, 23, 3)) +
+  labs(title = "Average PM2.5 by Hour of Day",
+       subtitle = "Hourly data, March 2025 to October 2026",
+       x = "Hour of day (0 to 23)", y = "Average PM2.5 (µg/m³)") +
+  theme_minimal()
+```
+
+Average PM2.5 stayed between about 6.3 and 7.8 µg/m³ across the 24 hours, and the differences were not statistically significant (p = 0.130). The vertical axis of the chart above is zoomed in, so the differences look larger than they are.
+
+### Year
+
+```{r year}
+year_table <- laguna_hourly %>%
+  group_by(year) %>%
+  summarise(hours = n(), median = round(median(pm2_5), 2),
+            mean = round(mean(pm2_5), 2), max = round(max(pm2_5), 2),
+            .groups = "drop")
+kable(year_table, caption = "PM2.5 by year (2023 covers Nov to Dec only)")
+
+kruskal.test(pm2_5 ~ year_f, data = laguna_hourly)
+```
+
+```{r chart-year, fig.cap="PM2.5 by year"}
+ggplot(laguna_hourly, aes(year_f, pm2_5, fill = year_f)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  coord_cartesian(ylim = c(0, 40)) +
+  labs(title = "PM2.5 by Year in Laguna",
+       subtitle = "Axis cut at 40; 2023 covers Nov to Dec only",
+       x = "Year", y = "PM2.5 (µg/m³)") +
+  theme_minimal() + theme(legend.position = "none")
+```
+
+PM2.5 differed by year (p < 0.001). The 2024 average was 17.29 µg/m³, compared with 6.23 in 2025 and 8.49 in 2026.
+
+```{r top-days}
+laguna_hourly %>%
+  mutate(date = as_date(datetime)) %>%
+  group_by(date) %>%
+  summarise(avg_pm25 = round(mean(pm2_5), 1), hours = n(), .groups = "drop") %>%
+  arrange(desc(avg_pm25)) %>%
+  head(10) %>%
+  kable(caption = "Ten days with the highest average PM2.5")
+```
+
+The highest daily averages were all in 2024, with October 11, 2024 the highest (205.3 µg/m³). The cause is not known.
+
+## 3.4 Weather
+
+```{r weather-cor}
+weather_vars <- c("temperature", "humidity", "rain_mm", "wind_kmh")
+
+weather_cor <- map_dfr(weather_vars, function(v) {
+  t <- cor.test(air_w$pm2_5, air_w[[v]], method = "spearman", exact = FALSE)
+  tibble(variable = v, rho = round(unname(t$estimate), 3),
+         p_value = signif(t$p.value, 3))
+}) %>%
+  mutate(strength = case_when(abs(rho) >= 0.7 ~ "strong",
+                              abs(rho) >= 0.4 ~ "moderate",
+                              abs(rho) >= 0.2 ~ "weak",
+                              TRUE            ~ "very weak")) %>%
+  arrange(desc(abs(rho)))
+
+kable(weather_cor, caption = "Spearman correlation of PM2.5 with weather")
+
+air_w %>%
+  group_by(rain_group) %>%
+  summarise(hours = n(), median = round(median(pm2_5), 2),
+            mean = round(mean(pm2_5), 2), .groups = "drop") %>%
+  kable(caption = "PM2.5 by rain at that hour (µg/m³)")
+```
+
+```{r chart-rain, fig.cap="PM2.5 on dry and rainy hours"}
+ggplot(air_w, aes(rain_group, pm2_5, fill = rain_group)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  coord_cartesian(ylim = c(0, 40)) +
+  scale_fill_manual(values = c("No rain" = "#fdae6b", "Light rain" = "#9ecae1",
+                               "Moderate/heavy rain" = "#3182bd")) +
+  labs(title = "PM2.5 on Dry and Rainy Hours",
+       subtitle = "Axis cut at 40 to show the main range",
+       x = "Rain at that hour", y = "PM2.5 (µg/m³)") +
+  theme_minimal() + theme(legend.position = "none")
+```
+
+Weather has very weak relationships with PM2.5 (all |rho| below 0.2). Rain and humidity are slightly negative, wind is slightly positive, and temperature shows no clear relationship. Typical PM2.5 was lower during rain (median 5.77 with no rain, 4.16 with light rain, and 3.50 with moderate or heavy rain). The moderate or heavy rain group has only 344 hours.
+
+## 3.5 How much do these factors explain?
+
+```{r model}
+model_time <- lm(log1p(pm2_5) ~ season + year_f + hour_f, data = air_w)
+model_all  <- lm(log1p(pm2_5) ~ temperature + humidity + rain_mm + wind_kmh +
+                   season + year_f + hour_f, data = air_w)
+
+tibble(model = c("Time only (season, year, hour)", "Time + weather"),
+       r_squared = round(c(summary(model_time)$r.squared,
+                           summary(model_all)$r.squared), 3)) %>%
+  kable(caption = "Share of variation in log(PM2.5 + 1) explained (R-squared)")
+```
+
+Season, year, and hour explain about 16% of the variation in PM2.5. Adding weather raises this to about 19%.
+
+# 4. Discussion
+
+The results answer the practical question in three parts. First, PM2.5 moves closely with PM10 and, to a smaller degree, with SO2, CO, and NO2, which suggests shared sources or conditions. Second, among time factors, the season and the year matter, while the hour of day shows no clear pattern in this dataset. Third, weather has a small effect: rain and humidity are linked to somewhat lower PM2.5, which fits the idea that rain clears particles from the air, although this study did not test that directly.
+
+The most unusual finding is 2024, when PM2.5 was much higher and spikier than in 2025 and 2026. The data cannot explain why. It could be real pollution events, the less frequent readings that year, or errors in the modeled data, and each would need further checking.
+
+Season, year, hour, and weather together explain only about 19% of the variation in PM2.5. Most of the changes therefore come from factors that are not in the dataset, such as traffic, burning, and industrial sources.
+
+# 5. Limitations
+
+1. The air quality values are modeled estimates from OpenWeatherMap, not measurements from local sensors. The weather values are also modeled and come from one point in the middle of the three towns.
+2. Biñan, Cabuyao, and Calamba have almost identical values, so the study behaves like one location and cannot compare towns.
+3. Readings before March 2025 were recorded every few hours instead of every hour, and there are 15 gaps longer than 24 hours (the longest is about 8 days).
+4. The 2024 spikes, including a reading of PM2.5 350 µg/m³ on October 11, 2024, were kept but are unexplained.
+5. With thousands of hourly readings, statistical tests become significant very easily, and neighboring hours are not independent, so p-values are likely overstated. Medians and correlations should be read alongside them.
+6. The data covers about three years, and the final days of air quality data have no matching weather.
+7. The air quality level uses the OpenWeatherMap 1 to 5 scale, which is not the same as the 0 to 500 US AQI.
+
+# 6. Conclusion
+
+Air quality in Biñan, Cabuyao, and Calamba was Good or Fair in about 89% of hours between November 2023 and October 2026. PM2.5 is strongly tied to PM10, is typically lower in the rainy season and during rain, shows no clear daily pattern, and was unusually high in 2024. Weather and time factors together explain only a small part of the changes, so a forecasting model should not expect high accuracy from these inputs alone. These findings guide the machine learning forecasting work in CSST102.
+
+# 7. References
+
+- BwandoWando. (2026). *Philippine Cities Air Quality Index Data 2026* [Data set]. Kaggle. https://www.kaggle.com/datasets/bwandowando/philippine-cities-air-quality-index-data-2026
+- OpenWeatherMap. *Air Pollution API*. https://openweathermap.org/
+- Zippenfenig, P. (2023). *Open-Meteo.com Weather API* [Computer software]. Zenodo. https://doi.org/10.5281/ZENODO.7970649
+- Hersbach, H., et al. (2020). The ERA5 global reanalysis. *Quarterly Journal of the Royal Meteorological Society, 146*(730), 1999-2049. https://doi.org/10.1002/qj.3803
+- R Core Team. (2026). *R: A language and environment for statistical computing* (Version 4.6.1) [Computer software]. R Foundation for Statistical Computing, Vienna, Austria. https://www.R-project.org/
+- Wickham, H., et al. (2019). Welcome to the tidyverse. *Journal of Open Source Software, 4*(43), 1686. https://doi.org/10.21105/joss.01686
+- United Nations. *Sustainable Development Goals*. https://sdgs.un.org/goals
+- DOST CALABARZON. *Hack4aProgress*. https://hack4aprogress.dostcalabarzon.ph/
+
+# 8. How to rerun this analysis
+
+1. Install R and RStudio, then install the packages once by running this in the Console:
+   `install.packages(c("tidyverse", "jsonlite", "knitr", "rmarkdown"))`
+2. Put these files in one folder: this file (`Laguna_AirQuality_Analysis.Rmd`), `laguna_air_quality_2023-2026.csv`, and (optional) `weather_laguna.csv`.
+3. Open the `.Rmd` file in RStudio.
+4. Click **Knit** (the button above the file) and choose **Knit to Word**. The report is created in the same folder.
+5. An internet connection is needed only if `weather_laguna.csv` is missing, because the script downloads the weather from Open-Meteo.
+
+# 9. Dashboard Demonstration
+
+A small interactive dashboard was built in R Shiny to present the results in a way that residents and LGU staff can read quickly. It is styled after public air quality pages such as Plume Labs. The code is in `laguna_dashboard_app.R`.
+
+**What it shows**
+
+- The air quality level (Good, Fair, Moderate, Poor, or Very Poor) at a selected date and hour, with the PM2.5 value and temperature.
+- General guidance for outdoor activity, which is not medical advice.
+- A PM2.5 trend chart with LIVE (48 hours), WEEK, MONTH, and YEAR views and a dotted annual average line.
+- The share of hours at each air quality level over the last 12 months, and the main pollutant values.
+- A map of Laguna with circles for Biñan, Cabuyao, and Calamba, colored by air quality level (made with the leaflet package on an OpenStreetMap background).
+- An AI forecast card that shows the next-day forecast from the CSST102 Random Forest model. It is marked experimental and shows the model's test accuracy (71%) next to the accuracy of the simple "tomorrow = today" rule (74%).
+
+**How to run it**
+
+1. Install the packages once: `install.packages(c("shiny", "plotly", "leaflet"))`.
+2. Put `laguna_dashboard_app.R`, `laguna_hourly_clean.csv`, `weather_laguna.csv`, and (for the forecast card) `forecast_next_day.csv` in one folder.
+3. Open `laguna_dashboard_app.R` in RStudio and click **Run App**. The map needs an internet connection.
+
+**Limits of the dashboard:** it shows saved data and is not a live feed. The three towns have almost identical values, so they share the same color on the map. The values are modeled estimates, not local sensor readings.
+
+*(Insert a screenshot of the dashboard here in Word.)*

@@ -1,0 +1,6 @@
+model,train_accuracy,test_accuracy,test_macro_F1,recall_moderate_or_worse
+Baseline: majority class,0.492,0.44,0.204,0.0
+Baseline: persistence (tomorrow = today),0.74,0.742,0.666,0.471
+Logistic Regression (A),0.78,0.718,0.494,0.0
+Random Forest (A: pollution + calendar),0.893,0.713,0.493,0.0
+Random Forest (B: + weather),0.807,0.684,0.472,0.0
